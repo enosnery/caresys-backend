@@ -12,7 +12,7 @@ public class MedicalRecord {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @ManyToOne(fetch = FetchType.LAZY)
+    @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "patient_id", nullable = false)
     private Patient patient;
 
@@ -42,6 +42,11 @@ public class MedicalRecord {
 
     public Patient getPatient() { return patient; }
     public void setPatient(Patient patient) { this.patient = patient; }
+
+    @com.fasterxml.jackson.annotation.JsonProperty("patientId")
+    public Long resolvePatientId() {
+        return patient != null ? patient.getId() : null;
+    }
 
     public Staff getStaff() { return staff; }
     public void setStaff(Staff staff) { this.staff = staff; }

@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS health_plans (
     id BIGSERIAL PRIMARY KEY,
     name VARCHAR(120) NOT NULL,
     code VARCHAR(50) NOT NULL UNIQUE,
-    copay_rate NUMERIC(5, 2) DEFAULT 0.00,
+    staff_value NUMERIC(10, 2) DEFAULT 0.00,
+    expected_payment_days INTEGER DEFAULT 30,
+    tax_rate NUMERIC(5, 2) DEFAULT 0.00,
     contact_phone VARCHAR(30),
     active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -100,7 +102,23 @@ CREATE TABLE IF NOT EXISTS appointments (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2.8 Tabela de Registros Financeiros & Cobranças (Faturamento)
+-- 2.8 Tabela de Fechamentos de Período de Faturamento
+CREATE TABLE IF NOT EXISTS billing_closures (
+    id BIGSERIAL PRIMARY KEY,
+    code VARCHAR(60) UNIQUE NOT NULL,
+    description VARCHAR(180),
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    appointments_count INTEGER NOT NULL DEFAULT 0,
+    total_gross_revenue NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+    total_tax NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+    total_staff_payment NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+    total_clinic_value NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+    notes TEXT,
+    closed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2.9 Tabela de Registros Financeiros & Cobranças (Faturamento)
 CREATE TABLE IF NOT EXISTS billing_records (
     id BIGSERIAL PRIMARY KEY,
     appointment_id BIGINT REFERENCES appointments(id) ON DELETE SET NULL,
@@ -112,11 +130,12 @@ CREATE TABLE IF NOT EXISTS billing_records (
     health_plan_id BIGINT REFERENCES health_plans(id) ON DELETE SET NULL,
     health_plan_name VARCHAR(120),
     value NUMERIC(10, 2) NOT NULL,
-    copay_value NUMERIC(10, 2) DEFAULT 0.00,
+    staff_value NUMERIC(10, 2) DEFAULT 0.00,
     procedure_code VARCHAR(100),
     payment_method VARCHAR(50),
     invoice_number VARCHAR(100) NOT NULL,
     billing_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+    billing_closure_id BIGINT REFERENCES billing_closures(id) ON DELETE SET NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -128,8 +147,17 @@ CREATE TABLE IF NOT EXISTS billing_records (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 
 -- Remoção da obrigatoriedade e constraint antiga de CREFITO na tabela de colaboradores
-ALTER TABLE staff ALTER COLUMN crefito DROP NOT NULL;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'staff' AND column_name = 'crefito'
+    ) THEN
+        ALTER TABLE staff ALTER COLUMN crefito DROP NOT NULL;
+    END IF;
+END $$;
 ALTER TABLE staff DROP CONSTRAINT IF EXISTS uk_staff_crefito;
+ALTER TABLE staff ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
 
 -- Garantia da relação 1:1 entre Usuário e Colaborador (staff.user_id UNIQUE)
 DO $$
@@ -143,6 +171,19 @@ END $$;
 
 -- Coluna de fisioterapeuta responsável na tabela de pacientes
 ALTER TABLE patients ADD COLUMN IF NOT EXISTS staff_id BIGINT REFERENCES staff(id) ON DELETE SET NULL;
+
+-- Migração dos Planos de Saúde: substituição de coparticipação por valor colaborador, prazo de pagamento e alíquota de imposto
+ALTER TABLE health_plans ADD COLUMN IF NOT EXISTS staff_value NUMERIC(10, 2) DEFAULT 0.00;
+ALTER TABLE health_plans ADD COLUMN IF NOT EXISTS expected_payment_days INTEGER DEFAULT 30;
+ALTER TABLE health_plans ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(5, 2) DEFAULT 0.00;
+ALTER TABLE health_plans ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE;
+ALTER TABLE health_plans DROP COLUMN IF EXISTS copay_rate;
+
+-- Migração do Faturamento (billing_records): substituição de copay_value por staff_value e vínculo com fechamento de período
+ALTER TABLE billing_records ADD COLUMN IF NOT EXISTS staff_value NUMERIC(10, 2) DEFAULT 0.00;
+ALTER TABLE billing_records DROP COLUMN IF EXISTS copay_value;
+ALTER TABLE billing_records ADD COLUMN IF NOT EXISTS billing_closure_id BIGINT REFERENCES billing_closures(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_billing_closure ON billing_records(billing_closure_id);
 
 -- Criação de Índices de Alta Performance
 CREATE INDEX IF NOT EXISTS idx_appointments_date_staff ON appointments(appointment_date, staff_id);
@@ -173,19 +214,26 @@ SET email = EXCLUDED.email,
     role = EXCLUDED.role,
     active = EXCLUDED.active;
 
--- 4.2 Planos de Saúde
-INSERT INTO health_plans (name, code, copay_rate, contact_phone, active)
+-- 4.2 Planos de Saúde (com Valor Colaborador, Prazo Previsto de Pagamento em Dias e Alíquota de Imposto %)
+INSERT INTO health_plans (name, code, staff_value, expected_payment_days, tax_rate, contact_phone, active)
 VALUES
-('Unimed Seguros', 'UNI-01', 20.00, '(11) 3222-1000', TRUE),
-('Bradesco Saúde', 'BRAD-02', 15.00, '(11) 3333-2000', TRUE),
-('Amil Assistência Médica', 'AMIL-03', 25.00, '(11) 3444-3000', TRUE),
-('SulAmérica Saúde', 'SUL-04', 10.00, '(11) 3555-4000', TRUE),
-('NotreDame Intermédica', 'GNDI-05', 30.00, '(11) 3666-5000', TRUE)
+('Unimed Seguros', 'UNI-01', 55.00, 30, 6.00, '(11) 3222-1000', TRUE),
+('Bradesco Saúde', 'BRAD-02', 50.00, 45, 8.00, '(11) 3333-2000', TRUE),
+('Amil Assistência Médica', 'AMIL-03', 48.00, 30, 6.00, '(11) 3444-3000', TRUE),
+('SulAmérica Saúde', 'SUL-04', 60.00, 30, 7.50, '(11) 3555-4000', TRUE),
+('NotreDame Intermédica', 'GNDI-05', 45.00, 60, 6.00, '(11) 3666-5000', TRUE)
 ON CONFLICT (code) DO UPDATE
 SET name = EXCLUDED.name,
-    copay_rate = EXCLUDED.copay_rate,
+    staff_value = EXCLUDED.staff_value,
+    expected_payment_days = EXCLUDED.expected_payment_days,
+    tax_rate = EXCLUDED.tax_rate,
     contact_phone = EXCLUDED.contact_phone,
     active = EXCLUDED.active;
+
+-- Garante que planos customizados já existentes não fiquem com valores nulos nos novos campos
+UPDATE health_plans SET staff_value = 50.00 WHERE staff_value IS NULL OR staff_value = 0;
+UPDATE health_plans SET expected_payment_days = 30 WHERE expected_payment_days IS NULL OR expected_payment_days = 0;
+UPDATE health_plans SET tax_rate = 6.00 WHERE tax_rate IS NULL;
 
 -- 4.3 Colaboradores (com link 1:1 dinâmico ao id do usuário correspondente)
 INSERT INTO staff (name, role, phone, email, user_id, active)
@@ -275,8 +323,8 @@ WHERE p.name = 'Carlos Eduardo Nogueira' AND s.name = 'Dra. Camila Alencar'
 AND NOT EXISTS (SELECT 1 FROM appointments WHERE appointment_date = CURRENT_DATE AND appointment_time = '10:00:00' AND staff_id = s.id);
 
 -- 4.7 Faturamento / Cobranças Iniciais
-INSERT INTO billing_records (appointment_id, patient_id, staff_id, billing_date, billing_time, is_health_plan, health_plan_id, health_plan_name, value, copay_value, procedure_code, payment_method, invoice_number, billing_status)
-SELECT a.id, p.id, s.id, CURRENT_DATE, '08:00:00', TRUE, hp.id, hp.name, 120.00, 24.00, 'FISIO-LOMBAR-01', 'Guia TISS', 'FAT-2026-0001', 'submitted'
+INSERT INTO billing_records (appointment_id, patient_id, staff_id, billing_date, billing_time, is_health_plan, health_plan_id, health_plan_name, value, staff_value, procedure_code, payment_method, invoice_number, billing_status)
+SELECT a.id, p.id, s.id, CURRENT_DATE, '08:00:00', TRUE, hp.id, hp.name, 120.00, hp.staff_value, 'FISIO-LOMBAR-01', 'Guia TISS', 'FAT-2026-0001', 'submitted'
 FROM appointments a
 JOIN patients p ON a.patient_id = p.id
 JOIN staff s ON a.staff_id = s.id
@@ -284,10 +332,23 @@ JOIN health_plans hp ON hp.code = 'UNI-01'
 WHERE a.appointment_date = CURRENT_DATE AND a.appointment_time = '08:00:00' AND s.name = 'Dra. Camila Alencar'
 AND NOT EXISTS (SELECT 1 FROM billing_records WHERE invoice_number = 'FAT-2026-0001');
 
-INSERT INTO billing_records (appointment_id, patient_id, staff_id, billing_date, billing_time, is_health_plan, health_plan_id, health_plan_name, value, copay_value, procedure_code, payment_method, invoice_number, billing_status)
-SELECT NULL, p.id, s.id, CURRENT_DATE, '09:00:00', FALSE, NULL, 'Particular', 160.00, 0.00, 'FISIO-JOELHO-PART', 'Pix', 'REC-2026-0001', 'paid'
+INSERT INTO billing_records (appointment_id, patient_id, staff_id, billing_date, billing_time, is_health_plan, health_plan_id, health_plan_name, value, staff_value, procedure_code, payment_method, invoice_number, billing_status)
+SELECT NULL, p.id, s.id, CURRENT_DATE, '09:00:00', FALSE, NULL, 'Particular', 160.00, 80.00, 'FISIO-JOELHO-PART', 'Pix', 'REC-2026-0001', 'paid'
 FROM patients p, staff s
 WHERE p.name = 'Beatriz Vasconcelos' AND s.name = 'Dr. Rodrigo Menezes'
 AND NOT EXISTS (SELECT 1 FROM billing_records WHERE invoice_number = 'REC-2026-0001');
+
+-- Atualiza registros financeiros já existentes para preencher staff_value de acordo com o plano ou particular
+UPDATE billing_records br
+SET staff_value = hp.staff_value
+FROM health_plans hp
+WHERE br.is_health_plan = TRUE
+  AND br.health_plan_id = hp.id
+  AND (br.staff_value IS NULL OR br.staff_value = 0);
+
+UPDATE billing_records
+SET staff_value = 80.00
+WHERE (is_health_plan = FALSE OR health_plan_id IS NULL)
+  AND (staff_value IS NULL OR staff_value = 0);
 
 -- Fim do script de DDL / DML

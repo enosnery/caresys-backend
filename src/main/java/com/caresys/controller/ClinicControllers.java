@@ -222,10 +222,8 @@ public class ClinicControllers {
             BigDecimal baseValue = new BigDecimal("135.00");
             billing.setValue(baseValue);
 
-            BigDecimal copayRate = hp.getCopayRate() != null ? hp.getCopayRate() : BigDecimal.ZERO;
-            BigDecimal copayVal = baseValue.multiply(copayRate)
-                    .divide(new BigDecimal("100.00"), 2, java.math.RoundingMode.HALF_UP);
-            billing.setCopayValue(copayVal);
+            BigDecimal staffVal = hp.getStaffValue() != null ? hp.getStaffValue() : BigDecimal.ZERO;
+            billing.setStaffValue(staffVal);
             billing.setPaymentMethod("Guia TISS");
             billing.setInvoiceNumber(String.format("FAT-%d-%04d", LocalDate.now().getYear(),
                     (appointment.getId() * 100 + (System.currentTimeMillis() % 100)) % 10000));
@@ -234,7 +232,7 @@ public class ClinicControllers {
             billing.setHealthPlan(null);
             billing.setHealthPlanName("Particular");
             billing.setValue(new BigDecimal("160.00"));
-            billing.setCopayValue(BigDecimal.ZERO);
+            billing.setStaffValue(new BigDecimal("70.00"));
             billing.setPaymentMethod("Pix");
             billing.setInvoiceNumber(String.format("REC-%d-%04d", LocalDate.now().getYear(),
                     (appointment.getId() * 100 + (System.currentTimeMillis() % 100)) % 10000));
@@ -267,6 +265,21 @@ public class ClinicControllers {
 
         @Autowired
         private BillingRecordRepository billingRepository;
+
+        @GetMapping
+        @Operation(summary = "Listar todos os registros de prontuário (para cruzamento em relatórios)")
+        public List<MedicalRecord> getAll(org.springframework.security.core.Authentication authentication) {
+            if (isPhysioRestricted(authentication)) {
+                Staff currentStaff = staffRepository.findByUserUsername(authentication.getName()).orElse(null);
+                if (currentStaff == null) {
+                    return List.of();
+                }
+                return recordRepository.findAll().stream()
+                        .filter(r -> r.getStaff() != null && currentStaff.getId().equals(r.getStaff().getId()))
+                        .collect(Collectors.toList());
+            }
+            return recordRepository.findAll();
+        }
 
         @GetMapping("/patient/{patientId}")
         @Operation(summary = "Obter histórico cronológico de prontuário do paciente")
@@ -540,8 +553,14 @@ public class ClinicControllers {
 
             plan.setName(plan.getName().trim());
             plan.setCode(plan.getCode().trim().toUpperCase());
-            if (plan.getCopayRate() == null || plan.getCopayRate().compareTo(BigDecimal.ZERO) < 0) {
-                plan.setCopayRate(BigDecimal.ZERO);
+            if (plan.getStaffValue() == null || plan.getStaffValue().compareTo(BigDecimal.ZERO) < 0) {
+                plan.setStaffValue(BigDecimal.ZERO);
+            }
+            if (plan.getExpectedPaymentDays() == null || plan.getExpectedPaymentDays() < 0) {
+                plan.setExpectedPaymentDays(30);
+            }
+            if (plan.getTaxRate() == null || plan.getTaxRate().compareTo(BigDecimal.ZERO) < 0) {
+                plan.setTaxRate(BigDecimal.ZERO);
             }
             if (plan.getActive() == null) {
                 plan.setActive(true);
@@ -564,8 +583,14 @@ public class ClinicControllers {
                     }
                     plan.setCode(formattedCode);
                 }
-                if (updated.getCopayRate() != null && updated.getCopayRate().compareTo(BigDecimal.ZERO) >= 0) {
-                    plan.setCopayRate(updated.getCopayRate());
+                if (updated.getStaffValue() != null && updated.getStaffValue().compareTo(BigDecimal.ZERO) >= 0) {
+                    plan.setStaffValue(updated.getStaffValue());
+                }
+                if (updated.getExpectedPaymentDays() != null && updated.getExpectedPaymentDays() >= 0) {
+                    plan.setExpectedPaymentDays(updated.getExpectedPaymentDays());
+                }
+                if (updated.getTaxRate() != null && updated.getTaxRate().compareTo(BigDecimal.ZERO) >= 0) {
+                    plan.setTaxRate(updated.getTaxRate());
                 }
                 if (updated.getContactPhone() != null) {
                     plan.setContactPhone(updated.getContactPhone());
@@ -834,6 +859,155 @@ public class ClinicControllers {
         @Autowired
         private AppointmentRepository appointmentRepository;
 
+        @Autowired
+        private BillingClosureRepository closureRepository;
+
+        public static class BillingClosureRequest {
+            public String description;
+            public LocalDate startDate;
+            public LocalDate endDate;
+            public String notes;
+            public List<Long> appointmentIds;
+            public List<Long> billingRecordIds;
+        }
+
+        @GetMapping("/closures")
+        @Operation(summary = "Listar todos os fechamentos de período de faturamento")
+        public List<BillingClosure> getAllClosures() {
+            return closureRepository.findAllByOrderByClosedAtDesc();
+        }
+
+        @PostMapping("/closures")
+        @Operation(summary = "Realizar o fechamento de um período de faturamento com os atendimentos selecionados")
+        public ResponseEntity<?> createClosure(@RequestBody BillingClosureRequest req) {
+            if (req.startDate == null || req.endDate == null) {
+                return ResponseEntity.badRequest().body(Map.of("message", "Data inicial e data final do período são obrigatórias."));
+            }
+            if (req.endDate.isBefore(req.startDate)) {
+                return ResponseEntity.badRequest().body(Map.of("message", "A data final não pode ser anterior à data inicial."));
+            }
+
+            java.util.LinkedHashMap<Long, BillingRecord> selectedRecordsMap = new java.util.LinkedHashMap<>();
+
+            // 1. Resolver a partir de appointmentIds selecionados
+            if (req.appointmentIds != null) {
+                for (Long aptId : req.appointmentIds) {
+                    if (aptId == null) continue;
+                    Appointment apt = appointmentRepository.findById(aptId).orElse(null);
+                    if (apt == null) continue;
+
+                    BillingRecord br = billingRepository.findByAppointmentId(aptId).orElse(null);
+                    if (br == null) {
+                        generateAutomaticBillingForAppointment(apt, billingRepository);
+                        br = billingRepository.findByAppointmentId(aptId).orElse(null);
+                    }
+                    if (br != null) {
+                        selectedRecordsMap.put(br.getId(), br);
+                    }
+                }
+            }
+
+            // 2. Resolver a partir de billingRecordIds selecionados diretamente
+            if (req.billingRecordIds != null) {
+                for (Long brId : req.billingRecordIds) {
+                    if (brId == null) continue;
+                    billingRepository.findById(brId).ifPresent(br -> selectedRecordsMap.put(br.getId(), br));
+                }
+            }
+
+            if (selectedRecordsMap.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("message", "Selecione ao menos um atendimento para realizar o fechamento do período."));
+            }
+
+            // 3. Validar que nenhum atendimento selecionado já foi faturado/fechado anteriormente
+            for (BillingRecord br : selectedRecordsMap.values()) {
+                if (br.getBillingClosure() != null) {
+                    return ResponseEntity.status(409).body(Map.of(
+                            "message",
+                            String.format("O atendimento/guia %s (%s em %s) já foi faturado no fechamento %s e não pode ser faturado mais de uma vez.",
+                                    br.getInvoiceNumber(),
+                                    br.getPatient() != null ? br.getPatient().getName() : "Paciente",
+                                    br.getBillingDate(),
+                                    br.getBillingClosure().getCode())
+                    ));
+                }
+            }
+
+            // 4. Calcular valores totais do fechamento (Bruto, Impostos, Valor Colaboradores e Valor Líquido Clínica)
+            BigDecimal totalGross = BigDecimal.ZERO;
+            BigDecimal totalTax = BigDecimal.ZERO;
+            BigDecimal totalStaff = BigDecimal.ZERO;
+
+            for (BillingRecord br : selectedRecordsMap.values()) {
+                BigDecimal val = br.getValue() != null ? br.getValue() : BigDecimal.ZERO;
+                BigDecimal staffVal = br.getStaffValue() != null ? br.getStaffValue() : BigDecimal.ZERO;
+
+                if (staffVal.compareTo(BigDecimal.ZERO) == 0) {
+                    if (Boolean.TRUE.equals(br.getIsHealthPlan()) && br.getHealthPlan() != null && br.getHealthPlan().getStaffValue() != null) {
+                        staffVal = br.getHealthPlan().getStaffValue();
+                        br.setStaffValue(staffVal);
+                    } else if (!Boolean.TRUE.equals(br.getIsHealthPlan())) {
+                        staffVal = new BigDecimal("80.00");
+                        br.setStaffValue(staffVal);
+                    }
+                }
+
+                BigDecimal taxRate = BigDecimal.ZERO;
+                if (Boolean.TRUE.equals(br.getIsHealthPlan()) && br.getHealthPlan() != null && br.getHealthPlan().getTaxRate() != null) {
+                    taxRate = br.getHealthPlan().getTaxRate();
+                }
+                BigDecimal itemTax = val.multiply(taxRate).divide(new BigDecimal("100"), 2, java.math.RoundingMode.HALF_UP);
+
+                totalGross = totalGross.add(val);
+                totalTax = totalTax.add(itemTax);
+                totalStaff = totalStaff.add(staffVal);
+            }
+
+            BigDecimal totalClinic = totalGross.subtract(totalTax).subtract(totalStaff);
+
+            BillingClosure closure = new BillingClosure();
+            String code = String.format("FECH-%d-%04d", LocalDate.now().getYear(), (closureRepository.count() + 1) * 10 + (System.currentTimeMillis() % 10));
+            closure.setCode(code);
+            closure.setDescription(req.description != null && !req.description.isBlank()
+                    ? req.description.trim()
+                    : String.format("Fechamento %s a %s", req.startDate, req.endDate));
+            closure.setStartDate(req.startDate);
+            closure.setEndDate(req.endDate);
+            closure.setAppointmentsCount(selectedRecordsMap.size());
+            closure.setTotalGrossRevenue(totalGross);
+            closure.setTotalTax(totalTax);
+            closure.setTotalStaffPayment(totalStaff);
+            closure.setTotalClinicValue(totalClinic);
+            closure.setNotes(req.notes);
+            closure.setClosedAt(Instant.now());
+
+            BillingClosure savedClosure = closureRepository.save(closure);
+
+            for (BillingRecord br : selectedRecordsMap.values()) {
+                br.setBillingClosure(savedClosure);
+                if ("pending".equalsIgnoreCase(br.getBillingStatus())) {
+                    br.setBillingStatus("approved");
+                }
+                billingRepository.save(br);
+            }
+
+            return ResponseEntity.ok(savedClosure);
+        }
+
+        @DeleteMapping("/closures/{id}")
+        @Operation(summary = "Reabrir / Estornar fechamento de período, liberando seus atendimentos")
+        public ResponseEntity<?> deleteClosure(@PathVariable Long id) {
+            return closureRepository.findById(id).map(closure -> {
+                List<BillingRecord> linked = billingRepository.findByBillingClosureId(id);
+                for (BillingRecord br : linked) {
+                    br.setBillingClosure(null);
+                    billingRepository.save(br);
+                }
+                closureRepository.delete(closure);
+                return ResponseEntity.ok(Map.of("message", "Fechamento estornado com sucesso. Os atendimentos foram liberados."));
+            }).orElse(ResponseEntity.notFound().build());
+        }
+
         @GetMapping
         @Operation(summary = "Listar registros financeiros (ROLE_PHYSIO vê apenas os vinculados ao seu colaborador)")
         public List<BillingRecord> getAll(org.springframework.security.core.Authentication authentication) {
@@ -914,7 +1088,11 @@ public class ClinicControllers {
             record.setStaff(staff);
 
             if (record.getAppointment() != null && record.getAppointment().getId() != null) {
-                appointmentRepository.findById(record.getAppointment().getId()).ifPresent(record::setAppointment);
+                Long aptId = record.getAppointment().getId();
+                if (billingRepository.existsByAppointmentId(aptId)) {
+                    return ResponseEntity.status(409).body(Map.of("message", "Este atendimento já foi faturado anteriormente e não pode ser faturado mais de uma vez."));
+                }
+                appointmentRepository.findById(aptId).ifPresent(record::setAppointment);
             } else {
                 record.setAppointment(null);
             }
@@ -941,8 +1119,12 @@ public class ClinicControllers {
             if (record.getBillingTime() == null) {
                 record.setBillingTime(LocalTime.now());
             }
-            if (record.getCopayValue() == null) {
-                record.setCopayValue(BigDecimal.ZERO);
+            if (record.getStaffValue() == null) {
+                if (Boolean.TRUE.equals(record.getIsHealthPlan()) && record.getHealthPlan() != null && record.getHealthPlan().getStaffValue() != null) {
+                    record.setStaffValue(record.getHealthPlan().getStaffValue());
+                } else {
+                    record.setStaffValue(BigDecimal.ZERO);
+                }
             }
             if (record.getInvoiceNumber() == null || record.getInvoiceNumber().isBlank()) {
                 String prefix = Boolean.TRUE.equals(record.getIsHealthPlan()) ? "FAT" : "REC";
@@ -962,8 +1144,8 @@ public class ClinicControllers {
                 if (updated.getValue() != null && updated.getValue().compareTo(BigDecimal.ZERO) > 0) {
                     record.setValue(updated.getValue());
                 }
-                if (updated.getCopayValue() != null && updated.getCopayValue().compareTo(BigDecimal.ZERO) >= 0) {
-                    record.setCopayValue(updated.getCopayValue());
+                if (updated.getStaffValue() != null && updated.getStaffValue().compareTo(BigDecimal.ZERO) >= 0) {
+                    record.setStaffValue(updated.getStaffValue());
                 }
                 if (updated.getBillingStatus() != null && !updated.getBillingStatus().isBlank()) {
                     record.setBillingStatus(updated.getBillingStatus());

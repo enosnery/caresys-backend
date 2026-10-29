@@ -44,6 +44,12 @@ public class DataInitializer implements CommandLineRunner {
     @Autowired
     private AppointmentRepository appointmentRepository;
 
+    @Autowired
+    private MedicalRecordRepository medicalRecordRepository;
+
+    @Autowired
+    private BillingRecordRepository billingRecordRepository;
+
     @Override
     public void run(String... args) {
         final String sha256OfAdmin123 = sha256Hex("admin123");
@@ -60,11 +66,25 @@ public class DataInitializer implements CommandLineRunner {
         HealthPlan unimed = healthPlanRepository.findAll().stream()
                 .filter(p -> "UNI-01".equals(p.getCode()))
                 .findFirst()
+                .map(p -> {
+                    if (p.getStaffValue() == null || p.getStaffValue().compareTo(BigDecimal.ZERO) == 0) {
+                        p.setStaffValue(new BigDecimal("55.00"));
+                    }
+                    if (p.getExpectedPaymentDays() == null || p.getExpectedPaymentDays() == 0) {
+                        p.setExpectedPaymentDays(30);
+                    }
+                    if (p.getTaxRate() == null || p.getTaxRate().compareTo(BigDecimal.ZERO) == 0) {
+                        p.setTaxRate(new BigDecimal("6.00"));
+                    }
+                    return healthPlanRepository.save(p);
+                })
                 .orElseGet(() -> {
                     HealthPlan p = new HealthPlan();
                     p.setName("Unimed Seguros");
                     p.setCode("UNI-01");
-                    p.setCopayRate(new BigDecimal("20.00"));
+                    p.setStaffValue(new BigDecimal("55.00"));
+                    p.setExpectedPaymentDays(30);
+                    p.setTaxRate(new BigDecimal("6.00"));
                     p.setContactPhone("(11) 3222-1000");
                     return healthPlanRepository.save(p);
                 });
@@ -72,14 +92,60 @@ public class DataInitializer implements CommandLineRunner {
         HealthPlan bradesco = healthPlanRepository.findAll().stream()
                 .filter(p -> "BRAD-02".equals(p.getCode()))
                 .findFirst()
+                .map(p -> {
+                    if (p.getStaffValue() == null || p.getStaffValue().compareTo(BigDecimal.ZERO) == 0) {
+                        p.setStaffValue(new BigDecimal("50.00"));
+                    }
+                    if (p.getExpectedPaymentDays() == null || p.getExpectedPaymentDays() == 0) {
+                        p.setExpectedPaymentDays(45);
+                    }
+                    if (p.getTaxRate() == null || p.getTaxRate().compareTo(BigDecimal.ZERO) == 0) {
+                        p.setTaxRate(new BigDecimal("8.00"));
+                    }
+                    return healthPlanRepository.save(p);
+                })
                 .orElseGet(() -> {
                     HealthPlan p = new HealthPlan();
                     p.setName("Bradesco Saúde");
                     p.setCode("BRAD-02");
-                    p.setCopayRate(new BigDecimal("15.00"));
+                    p.setStaffValue(new BigDecimal("50.00"));
+                    p.setExpectedPaymentDays(45);
+                    p.setTaxRate(new BigDecimal("8.00"));
                     p.setContactPhone("(11) 3333-2000");
                     return healthPlanRepository.save(p);
                 });
+
+        // Garante que qualquer outro plano existente tenha valores válidos nos novos campos
+        healthPlanRepository.findAll().forEach(hp -> {
+            boolean updated = false;
+            if (hp.getStaffValue() == null) {
+                hp.setStaffValue(new BigDecimal("50.00"));
+                updated = true;
+            }
+            if (hp.getExpectedPaymentDays() == null || hp.getExpectedPaymentDays() == 0) {
+                hp.setExpectedPaymentDays(30);
+                updated = true;
+            }
+            if (hp.getTaxRate() == null) {
+                hp.setTaxRate(new BigDecimal("6.00"));
+                updated = true;
+            }
+            if (updated) {
+                healthPlanRepository.save(hp);
+            }
+        });
+
+        // Garante que registros de faturamento existentes tenham staffValue populado
+        billingRecordRepository.findAll().forEach(br -> {
+            if (br.getStaffValue() == null || br.getStaffValue().compareTo(BigDecimal.ZERO) == 0) {
+                if (Boolean.TRUE.equals(br.getIsHealthPlan()) && br.getHealthPlan() != null && br.getHealthPlan().getStaffValue() != null) {
+                    br.setStaffValue(br.getHealthPlan().getStaffValue());
+                } else {
+                    br.setStaffValue(new BigDecimal("80.00"));
+                }
+                billingRecordRepository.save(br);
+            }
+        });
 
         // 3. Colaboradores (Staff) vinculados aos Usuários (Relação 1:1)
         Staff staffCamila = staffRepository.findByUserUsername("camila.alencar").orElseGet(() -> {
@@ -221,7 +287,18 @@ public class DataInitializer implements CommandLineRunner {
             a1.setActionsForDay("Liberação miofascial lombar e exercícios com bola suíça para core.");
             a1.setStatus("completed");
             a1.setNotes("Paciente compareceu pontualmente.");
-            appointmentRepository.save(a1);
+            a1 = appointmentRepository.save(a1);
+
+            if (medicalRecordRepository.findByPatientIdOrderByEvolutionDateDesc(patient1.getId()).isEmpty()) {
+                MedicalRecord mr1 = new MedicalRecord();
+                mr1.setPatient(patient1);
+                mr1.setStaff(staffCamila);
+                mr1.setPhysicalEvolution("EVA 3/10. Ganho de 15° em flexão lombar sem dor irradiada.");
+                mr1.setTreatmentConducted("Liberação miofascial lombar e exercícios com bola suíça para core.");
+                mr1.setNotes("Paciente respondeu muito bem à sessão.");
+                medicalRecordRepository.save(mr1);
+            }
+            com.caresys.controller.ClinicControllers.generateAutomaticBillingForAppointment(a1, billingRecordRepository);
 
             // Outra consulta para Dra. Camila (Carlos)
             Appointment a2 = new Appointment();

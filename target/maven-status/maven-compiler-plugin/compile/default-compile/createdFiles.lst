@@ -20,7 +20,9 @@ com\caresys\dto\DTOs.class
 com\caresys\repository\BillingRecordRepository.class
 com\caresys\repository\StaffRepository.class
 com\caresys\dto\DTOs$JwtResponse.class
+com\caresys\model\BillingClosure.class
 com\caresys\model\MedicalRecord.class
+com\caresys\controller\ClinicControllers$BillingController$BillingClosureRequest.class
 com\caresys\dto\DTOs$RefreshTokenRequest.class
 com\caresys\config\WebMvcSpaConfig.class
 com\caresys\dto\DTOs$TokenRefreshResponse.class
@@ -36,6 +38,7 @@ com\caresys\model\Staff.class
 com\caresys\repository\MedicalRecordRepository.class
 com\caresys\controller\ClinicControllers$BillingController.class
 com\caresys\config\OpenApiConfig.class
+com\caresys\repository\BillingClosureRepository.class
 com\caresys\repository\RefreshTokenRepository.class
 com\caresys\repository\AppointmentRepository.class
 com\caresys\controller\ClinicControllers$MedicalRecordController.class

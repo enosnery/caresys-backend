@@ -19,8 +19,14 @@ public class HealthPlan {
     @Column(nullable = false, unique = true, length = 50)
     private String code;
 
-    @Column(name = "copay_rate", precision = 5, scale = 2)
-    private BigDecimal copayRate = BigDecimal.ZERO;
+    @Column(name = "staff_value", precision = 10, scale = 2)
+    private BigDecimal staffValue = BigDecimal.ZERO;
+
+    @Column(name = "expected_payment_days")
+    private Integer expectedPaymentDays = 30;
+
+    @Column(name = "tax_rate", precision = 5, scale = 2)
+    private BigDecimal taxRate = BigDecimal.ZERO;
 
     @Column(name = "contact_phone", length = 30)
     private String contactPhone;
@@ -41,8 +47,14 @@ public class HealthPlan {
     public String getCode() { return code; }
     public void setCode(String code) { this.code = code; }
 
-    public BigDecimal getCopayRate() { return copayRate; }
-    public void setCopayRate(BigDecimal copayRate) { this.copayRate = copayRate; }
+    public BigDecimal getStaffValue() { return staffValue; }
+    public void setStaffValue(BigDecimal staffValue) { this.staffValue = staffValue; }
+
+    public Integer getExpectedPaymentDays() { return expectedPaymentDays; }
+    public void setExpectedPaymentDays(Integer expectedPaymentDays) { this.expectedPaymentDays = expectedPaymentDays; }
+
+    public BigDecimal getTaxRate() { return taxRate; }
+    public void setTaxRate(BigDecimal taxRate) { this.taxRate = taxRate; }
 
     public String getContactPhone() { return contactPhone; }
     public void setContactPhone(String contactPhone) { this.contactPhone = contactPhone; }
