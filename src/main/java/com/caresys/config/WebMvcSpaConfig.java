@@ -26,9 +26,9 @@ public class WebMvcSpaConfig implements WebMvcConfigurer {
 
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
-        // Serve os arquivos estáticos do build do Vue (classpath:/static/) e faz fallback de rotas SPA para index.html
+        // Serve os arquivos estáticos do build do Vue (classpath:/static/) e do Swagger UI (classpath:/META-INF/resources/)
         registry.addResourceHandler("/**")
-                .addResourceLocations("classpath:/static/")
+                .addResourceLocations("classpath:/static/", "classpath:/META-INF/resources/", "classpath:/META-INF/resources/webjars/")
                 .resourceChain(true)
                 .addResolver(new PathResourceResolver() {
                     @Override
@@ -37,11 +37,12 @@ public class WebMvcSpaConfig implements WebMvcConfigurer {
                         if (requestedResource.exists() && requestedResource.isReadable()) {
                             return requestedResource;
                         }
-                        // Não redireciona chamadas de API ou Swagger para o index.html
+                        // Não redireciona chamadas de API ou Swagger para o index.html do Vue
                         if (resourcePath.startsWith("api/") ||
                             resourcePath.equals("api") ||
                             resourcePath.startsWith("v3/") ||
-                            resourcePath.startsWith("swagger-ui")) {
+                            resourcePath.startsWith("swagger-ui") ||
+                            resourcePath.startsWith("webjars/")) {
                             return null;
                         }
                         Resource indexHtml = new ClassPathResource("/static/index.html");
